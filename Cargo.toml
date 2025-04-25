@@ -1,0 +1,8 @@
+[package]
+name = "tracker_emulation-rs"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+firmware_protocol = { git = "https://github.com/JovannMC/SlimeVR-Rust", package = "firmware_protocol" }
+tokio = { version = "1.44.2", features = ["net", "time", "sync", "macros", "rt"] }
