@@ -270,6 +270,42 @@ impl EmulatedTracker {
         self.send_packet(data).await
     }
 
+    pub async fn send_battery_level(&self, percentage: f32, voltage: f32) -> Result<(), String> {
+        let data = SbPacket::Battery {
+            percentage,
+            voltage,
+        };
+        self.send_packet(data).await
+    }
+
+    pub async fn send_temperature(&self, sensor_id: u8, temperature: f32) -> Result<(), String> {
+        let data = SbPacket::Temperature {
+            sensor_id,
+            temperature,
+        };
+        self.send_packet(data).await
+    }
+
+    pub async fn send_signal_strength(&self, sensor_id: u8, strength: i8) -> Result<(), String> {
+        let data = SbPacket::SignalStrength {
+            sensor_id,
+            strength,
+        };
+        self.send_packet(data).await
+    }
+
+    pub async fn send_magnetometer_accuracy(
+        &self,
+        sensor_id: u8,
+        accuracy: f32,
+    ) -> Result<(), String> {
+        let data = SbPacket::MagAccuracy {
+            sensor_id,
+            accuracy,
+        };
+        self.send_packet(data).await
+    }
+
     pub async fn send_user_action(&self, action: ActionType) -> Result<(), String> {
         let data = SbPacket::UserAction { action };
         self.send_packet(data).await
@@ -415,7 +451,7 @@ impl EmulatedTracker {
             McuType::OwoTrackAndroid => McuType::OwoTrackAndroid,
             McuType::Wrangler => McuType::Wrangler,
             McuType::OwoTrackIos => McuType::OwoTrackIos,
-            McuType::Esp32_C3 => McuType::Esp32_C3,
+            McuType::Esp32C3 => McuType::Esp32C3,
             McuType::Mocopi => McuType::Mocopi,
             McuType::Haritora => McuType::Haritora,
             McuType::DevReserved => McuType::DevReserved,
