@@ -181,10 +181,11 @@ impl EmulatedTracker {
     }
 
     async fn handle_packet(&self, data: &[u8]) -> Result<(), String> {
-        let (_rest, packet) = Packet::from_bytes((data, 0)).map_err(|e| format!("Failed to parse packet: {e}"))?;
-    
+        let (_rest, packet) =
+            Packet::from_bytes((data, 0)).map_err(|e| format!("Failed to parse packet: {e}"))?;
+
         let (_seq, packet_data) = packet.split();
-    
+
         match packet_data {
             CbPacket::Heartbeat => {
                 println!("Received Heartbeat packet");
@@ -206,7 +207,7 @@ impl EmulatedTracker {
                 println!("Received unknown packet: {:?}", packet_data);
             }
         }
-    
+
         Ok(())
     }
 
@@ -460,68 +461,124 @@ impl EmulatedTracker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::time::Duration;
 
     #[tokio::test]
-    async fn test_send_sensor_data() {
-        // tracker setup
-        let mac_address = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06];
-        let firmware_version = "test_firmware".to_string();
+    async fn test_all() {
+        use tokio::time::{sleep, Duration};
 
-        let mut tracker = EmulatedTracker::new(
-            mac_address,
-            firmware_version,
-            None,
-            None,
-            //None,
-            None,
-            None,
-            None,
-        )
-        .await
-        .expect("Failed to create EmulatedTracker");
+        let mac_address = [0xDE, 0xAD, 0xBE, 0xEF, 0x01, 0x02];
+        let firmware_version = "tracker_emulation-rs test".to_string();
+
+        // Create tracker instance
+        let mut tracker =
+            EmulatedTracker::new(mac_address, firmware_version, None, None, None, None, None)
+                .await
+                .expect("Failed to create EmulatedTracker");
 
         tracker.init().await.expect("Failed to initialize tracker");
+        sleep(Duration::from_secs(1)).await;
 
-        // add sensor
-        tracker
-            .add_sensor(ImuType::Mpu9250, SensorStatus::Ok)
-            .await
-            .expect("Failed to add sensor");
-
-        // random sensor data (rotation/accel)
-        for _ in 0..150 {
-            let quat = SlimeQuaternion {
-                i: rand::random::<f32>() * 2.0 - 1.0,
-                j: rand::random::<f32>() * 2.0 - 1.0,
-                k: rand::random::<f32>() * 2.0 - 1.0,
-                w: rand::random::<f32>() * 2.0 - 1.0,
-            };
-
+        // Add 5 sensors
+        for i in 0..5 {
             tracker
-                .send_rotation(
-                    0,
-                    SensorDataType::Normal,
-                    quat,
-                    100, // idk the range of accuracy it should be
-                )
+                .add_sensor(ImuType::Mpu6050, SensorStatus::Ok)
                 .await
-                .expect("Failed to send rotation data");
-
-            let accel = (
-                rand::random::<f32>() * 20.0 - 10.0,
-                rand::random::<f32>() * 20.0 - 10.0,
-                rand::random::<f32>() * 20.0 - 10.0,
-            );
-
-            tracker
-                .send_acceleration(0, accel)
-                .await
-                .expect("Failed to send acceleration data");
-
-            tokio::time::sleep(Duration::from_millis(40)).await;
+                .expect(&format!("Failed to add sensor {}", i));
+            sleep(Duration::from_millis(100)).await;
         }
 
-        tokio::time::sleep(Duration::from_secs(3)).await; // wait a few secs to test heartbeats lol
+        sleep(Duration::from_secs(3)).await;
+
+        // Send random rotation and acceleration to each sensor
+        for _ in 0..50 {
+            for sensor_id in 0..5 {
+                let quat = SlimeQuaternion {
+                    i: rand::random::<f32>(),
+                    j: rand::random::<f32>(),
+                    k: rand::random::<f32>(),
+                    w: rand::random::<f32>(),
+                };
+                tracker
+                    .send_rotation(sensor_id, SensorDataType::Normal, quat, 42)
+                    .await
+                    .expect("Failed to send rotation data");
+
+                let accel = (
+                    rand::random::<f32>(),
+                    rand::random::<f32>(),
+                    rand::random::<f32>(),
+                );
+                tracker
+                    .send_acceleration(sensor_id, accel)
+                    .await
+                    .expect("Failed to send acceleration data");
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+
+        // Send all user actions
+        for action in [
+            ActionType::Reset,
+            ActionType::ResetMounting,
+            ActionType::ResetYaw,
+            ActionType::PauseTracking,
+        ] {
+            let action_type = format!("{:?}", action);
+            tracker
+                .send_user_action(action)
+                .await
+                .expect(&format!("Failed to send user action: {:?}", action_type));
+            sleep(Duration::from_secs(3)).await;
+        }
+
+        // Deinit tracker and reinit
+        tracker.deinit().await.expect("Failed to deinit tracker");
+        sleep(Duration::from_secs(3)).await;
+        tracker
+            .init()
+            .await
+            .expect("Failed to re-initialize tracker");
+
+        // Add another sensor after reinit
+        tracker
+            .add_sensor(ImuType::Bno080, SensorStatus::Ok)
+            .await
+            .expect("Failed to add sensor after reinit");
+
+        sleep(Duration::from_secs(3)).await;
+
+        // Send random rotation and acceleration to each sensor
+        for _ in 0..50 {
+            for sensor_id in 0..5 {
+                let quat = SlimeQuaternion {
+                    i: rand::random::<f32>(),
+                    j: rand::random::<f32>(),
+                    k: rand::random::<f32>(),
+                    w: rand::random::<f32>(),
+                };
+                tracker
+                    .send_rotation(sensor_id, SensorDataType::Normal, quat, 42)
+                    .await
+                    .expect("Failed to send rotation data");
+
+                let accel = (
+                    rand::random::<f32>(),
+                    rand::random::<f32>(),
+                    rand::random::<f32>(),
+                );
+                tracker
+                    .send_acceleration(sensor_id, accel)
+                    .await
+                    .expect("Failed to send acceleration data");
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+
+        sleep(Duration::from_secs(3)).await;
+
+        tracker
+            .deinit()
+            .await
+            .expect("Failed to deinit tracker at end");
     }
 }
