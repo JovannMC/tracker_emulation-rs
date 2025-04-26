@@ -3,9 +3,9 @@ use firmware_protocol::{
     BoardType, ImuType, McuType, Packet, SbPacket, SensorDataType, SensorStatus, SlimeQuaternion,
 };
 use std::sync::{Arc, Mutex};
+use std::time::SystemTime;
 use tokio::net::UdpSocket;
 use tokio::sync::watch;
-use rand::Rng;
 
 pub struct TrackerState {
     pub status: String,
@@ -117,7 +117,8 @@ impl EmulatedTracker {
         drop(state);
 
         let mut discovery_interval = tokio::time::interval(std::time::Duration::from_secs(1));
-        let mut status_rx = self.status_rx.clone();
+
+        self.start_heartbeat().await;
 
         loop {
             tokio::select! {
@@ -137,11 +138,20 @@ impl EmulatedTracker {
                         match socket.recv_from(&mut buf).await {
                             Ok((size, addr)) => {
                                 println!("Received data from: {:?}, size: {}", addr, size);
-                                // Process the received data here
+                                println!("Data: {:?}", String::from_utf8_lossy(&buf[..size]));
                                 let mut state = self.state.lock().unwrap();
-                                state.status = "connected-to-server".to_string();
-                                self.status_tx.send("connected-to-server".to_string()).unwrap();
+                                if state.status != "connected-to-server" {
+                                    state.status = "connected-to-server".to_string();
+                                    self.status_tx.send("connected-to-server".to_string()).unwrap();
+                                }
+                                state.last_received_packet_time = SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap()
+                                    .as_millis() as u16;
                                 drop(state);
+
+                                // function to handle data
+                                //
                             }
                             Err(e) => {
                                 println!("Failed to receive data: {}", e);
@@ -192,6 +202,59 @@ impl EmulatedTracker {
      * Packet sending functions
      */
 
+    pub async fn start_heartbeat(&self) {
+        let socket = match self.socket.as_ref() {
+            Some(s) => s.clone(),
+            None => {
+                println!("Socket not initialized, cannot start heartbeat");
+                return;
+            }
+        };
+        let status_rx = self.status_rx.clone();
+        let server_ip = self.server_ip.clone();
+        let server_port = self.server_port;
+        let state = self.state.clone();
+
+        tokio::spawn(async move {
+            let result: Result<(), String> = async {
+                loop {
+                    if status_rx.borrow().as_str() == "initializing" {
+                        break;
+                    }
+
+                    // gotta manually grab these info instead of using my methods cause self has a limited lifetime
+                    // whatever that means man (i kinda get it but not really)
+                    let packet_number = {
+                        let mut state_lock = state.lock().unwrap();
+                        state_lock.packet_number += 1;
+                        state_lock.packet_number
+                    };
+                    let packet = Packet::new(packet_number, SbPacket::Heartbeat);
+
+                    // send heartbeat
+                    if let Err(e) = socket
+                        .send_to(
+                            &packet.to_bytes().unwrap(),
+                            (server_ip.as_str(), server_port),
+                        )
+                        .await
+                    {
+                        println!("Failed to send heartbeat packet: {e}");
+                    }
+
+                    println!("Heartbeat packet sent: {:?}", packet);
+
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                }
+                Ok(())
+            }
+            .await;
+            if let Err(e) = result {
+                println!("Error in heartbeat task: {}", e);
+            }
+        });
+    }
+
     // send_battery_level, send_rotation_data, send_acceleration, send_temperature, send_magnetometer_accuracy, send_signal_strength, send_user_action
     pub async fn send_sensor_info(&self, sensor: &Sensor) -> Result<(), String> {
         let data = SbPacket::SensorInfo {
@@ -200,10 +263,7 @@ impl EmulatedTracker {
             sensor_status: self.clone_sensor_status(&sensor.sensor_status),
         };
 
-        let packet_number = {
-            let state = self.state.lock().unwrap();
-            state.packet_number
-        };
+        let packet_number = self.get_packet_number().await?;
         let packet = Packet::new(packet_number, data);
 
         self.send_packet(packet).await
@@ -223,10 +283,7 @@ impl EmulatedTracker {
             calibration_info: accuracy,
         };
 
-        let packet_number = {
-            let state = self.state.lock().unwrap();
-            state.packet_number
-        };
+        let packet_number = self.get_packet_number().await?;
         let packet = Packet::new(packet_number, data);
 
         self.send_packet(packet).await
@@ -242,10 +299,7 @@ impl EmulatedTracker {
             vector: acceleration,
         };
 
-        let packet_number = {
-            let state = self.state.lock().unwrap();
-            state.packet_number
-        };
+        let packet_number = self.get_packet_number().await?;
         let packet = Packet::new(packet_number, data);
 
         self.send_packet(packet).await
@@ -291,6 +345,12 @@ impl EmulatedTracker {
             .await
             .map_err(|e| e.to_string())?;
         Ok(())
+    }
+
+    async fn get_packet_number(&self) -> Result<u64, String> {
+        let mut state = self.state.lock().unwrap();
+        state.packet_number += 1;
+        Ok(state.packet_number)
     }
 
     fn clone_board_type(&self) -> BoardType {
@@ -405,7 +465,7 @@ mod tests {
             .expect("Failed to add sensor");
 
         // random sensor data (rotation/accel)
-        for _ in 0..5 {
+        for _ in 0..150 {
             let quat = SlimeQuaternion {
                 i: rand::random::<f32>() * 2.0 - 1.0,
                 j: rand::random::<f32>() * 2.0 - 1.0,
@@ -430,16 +490,13 @@ mod tests {
             );
 
             tracker
-                .send_acceleration(
-                    0,
-                    accel,
-                )
+                .send_acceleration(0, accel)
                 .await
                 .expect("Failed to send acceleration data");
 
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            tokio::time::sleep(Duration::from_millis(40)).await;
         }
 
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::time::sleep(Duration::from_secs(3)).await; // wait a few secs to test heartbeats lol
     }
 }
