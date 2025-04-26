@@ -1,11 +1,12 @@
 use firmware_protocol::deku::prelude::*;
 use firmware_protocol::{
-    BoardType, ImuType, McuType, Packet, SbPacket, SensorDataType, SensorStatus, SlimeQuaternion,
+    ActionType, BoardType, ImuType, McuType, Packet, SbPacket, SensorDataType, SensorStatus,
+    SlimeQuaternion,
 };
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 use tokio::net::UdpSocket;
-use tokio::sync::watch;
+use tokio::sync::watch::{self, Receiver, Sender};
 
 pub struct TrackerState {
     pub status: String,
@@ -31,7 +32,7 @@ pub struct EmulatedTracker {
     // Configuration
     mac_address: [u8; 6],
     firmware_version: String,
-    feature_flags: FirmwareFeatureFlags,
+    //feature_flags: FirmwareFeatureFlags,
     board_type: BoardType,
     mcu_type: McuType,
     server_timeout: u64,
@@ -43,15 +44,15 @@ pub struct EmulatedTracker {
     // Socket stuff
     state: Arc<Mutex<TrackerState>>,
     socket: Option<Arc<UdpSocket>>,
-    status_tx: watch::Sender<String>,
-    status_rx: watch::Receiver<String>,
+    status_tx: Sender<String>,
+    status_rx: Receiver<String>,
 }
 
 impl EmulatedTracker {
     pub async fn new(
         mac_address: [u8; 6],
         firmware_version: String,
-        feature_flags: Option<FirmwareFeatureFlags>,
+        //feature_flags: Option<FirmwareFeatureFlags>,
         board_type: Option<BoardType>,
         mcu_type: Option<McuType>,
         server_ip: Option<String>,
@@ -59,7 +60,7 @@ impl EmulatedTracker {
         server_timeout_ms: Option<u64>,
     ) -> Result<Self, String> {
         // Set default values if the parameters are None
-        let feature_flags = feature_flags.unwrap_or(FirmwareFeatureFlags::None);
+        //let feature_flags = feature_flags.unwrap_or(FirmwareFeatureFlags::None);
         let board_type = board_type.unwrap_or(BoardType::Unknown(0));
         let mcu_type = mcu_type.unwrap_or(McuType::Unknown(0));
         let server_ip = server_ip.unwrap_or("255.255.255.255".to_string());
@@ -77,7 +78,7 @@ impl EmulatedTracker {
         Ok(Self {
             mac_address,
             firmware_version,
-            feature_flags,
+            //feature_flags,
             board_type,
             mcu_type,
             sensors: Vec::new(),
@@ -198,6 +199,50 @@ impl EmulatedTracker {
         Ok(())
     }
 
+    // TODO: add these to the firmware_protocol package
+    // send_battery_level, send_temperature, send_magnetometer_accuracy, send_signal_strength
+    async fn send_sensor_info(&self, sensor: &Sensor) -> Result<(), String> {
+        let data = SbPacket::SensorInfo {
+            sensor_id: sensor.sensor_id,
+            sensor_type: self.clone_sensor_type(&sensor.sensor_type),
+            sensor_status: self.clone_sensor_status(&sensor.sensor_status),
+        };
+        self.send_packet(data).await
+    }
+
+    pub async fn send_rotation(
+        &self,
+        sensor_id: u8,
+        data_type: SensorDataType,
+        rotation_data: SlimeQuaternion,
+        accuracy: u8,
+    ) -> Result<(), String> {
+        let data = SbPacket::RotationData {
+            sensor_id,
+            data_type,
+            quat: rotation_data,
+            calibration_info: accuracy,
+        };
+        self.send_packet(data).await
+    }
+
+    pub async fn send_acceleration(
+        &self,
+        sensor_id: u8,
+        acceleration: (f32, f32, f32),
+    ) -> Result<(), String> {
+        let data = SbPacket::Acceleration {
+            sensor_id,
+            vector: acceleration,
+        };
+        self.send_packet(data).await
+    }
+
+    pub async fn send_user_action(&self, action: ActionType) -> Result<(), String> {
+        let data = SbPacket::UserAction { action };
+        self.send_packet(data).await
+    }
+
     /*
      * Packet sending functions
      */
@@ -255,61 +300,10 @@ impl EmulatedTracker {
         });
     }
 
-    // send_battery_level, send_rotation_data, send_acceleration, send_temperature, send_magnetometer_accuracy, send_signal_strength, send_user_action
-    pub async fn send_sensor_info(&self, sensor: &Sensor) -> Result<(), String> {
-        let data = SbPacket::SensorInfo {
-            sensor_id: sensor.sensor_id,
-            sensor_type: self.clone_sensor_type(&sensor.sensor_type),
-            sensor_status: self.clone_sensor_status(&sensor.sensor_status),
-        };
-
+    async fn send_packet(&self, data: SbPacket) -> Result<(), String> {
         let packet_number = self.get_packet_number().await?;
         let packet = Packet::new(packet_number, data);
 
-        self.send_packet(packet).await
-    }
-
-    pub async fn send_rotation_data(
-        &self,
-        sensor_id: u8,
-        data_type: SensorDataType,
-        rotation_data: SlimeQuaternion,
-        accuracy: u8,
-    ) -> Result<(), String> {
-        let data = SbPacket::RotationData {
-            sensor_id,
-            data_type,
-            quat: rotation_data,
-            calibration_info: accuracy,
-        };
-
-        let packet_number = self.get_packet_number().await?;
-        let packet = Packet::new(packet_number, data);
-
-        self.send_packet(packet).await
-    }
-
-    pub async fn send_acceleration(
-        &self,
-        sensor_id: u8,
-        acceleration: (f32, f32, f32),
-    ) -> Result<(), String> {
-        let data = SbPacket::Acceleration {
-            sensor_id,
-            vector: acceleration,
-        };
-
-        let packet_number = self.get_packet_number().await?;
-        let packet = Packet::new(packet_number, data);
-
-        self.send_packet(packet).await
-    }
-
-    /*
-     * Packet sending utilities
-     */
-
-    async fn send_packet(&self, packet: Packet<SbPacket>) -> Result<(), String> {
         println!("Sending packet: {:?}", packet);
 
         let socket = self.socket.as_ref().expect("Socket not initialized");
@@ -474,7 +468,7 @@ mod tests {
             };
 
             tracker
-                .send_rotation_data(
+                .send_rotation(
                     0,
                     SensorDataType::Normal,
                     quat,
