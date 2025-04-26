@@ -1,7 +1,7 @@
 use firmware_protocol::deku::prelude::*;
 use firmware_protocol::{
-    ActionType, BoardType, ImuType, McuType, Packet, SbPacket, SensorDataType, SensorStatus,
-    SlimeQuaternion,
+    ActionType, BoardType, CbPacket, ImuType, McuType, Packet, SbPacket, SensorDataType,
+    SensorStatus, SlimeQuaternion,
 };
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
@@ -151,8 +151,9 @@ impl EmulatedTracker {
                                     .as_millis() as u16;
                                 drop(state);
 
-                                // function to handle data
-                                //
+                                if let Err(e) = self.handle_packet(&buf[..size]).await {
+                                    println!("Error handling packet: {}", e);
+                                }
                             }
                             Err(e) => {
                                 println!("Failed to receive data: {}", e);
@@ -176,6 +177,36 @@ impl EmulatedTracker {
         self.status_tx.send("initializing".to_string()).unwrap();
         state.status = "initializing".to_string();
         drop(state);
+        Ok(())
+    }
+
+    async fn handle_packet(&self, data: &[u8]) -> Result<(), String> {
+        let (_rest, packet) = Packet::from_bytes((data, 0)).map_err(|e| format!("Failed to parse packet: {e}"))?;
+    
+        let (_seq, packet_data) = packet.split();
+    
+        match packet_data {
+            CbPacket::Heartbeat => {
+                println!("Received Heartbeat packet");
+                let packet_data: SbPacket = SbPacket::Heartbeat {};
+                self.send_packet(packet_data).await?;
+            }
+            CbPacket::Ping { challenge } => {
+                println!("Received Ping packet with challenge: {:?}", challenge);
+                let packet_data: SbPacket = SbPacket::Ping { challenge };
+                self.send_packet(packet_data).await?;
+            }
+            CbPacket::Discovery => {
+                // println!("Received Discovery packet");
+            }
+            CbPacket::HandshakeResponse { .. } => {
+                //println!("Received HandshakeResponse packet with version: {}", version);
+            }
+            _ => {
+                println!("Received unknown packet: {:?}", packet_data);
+            }
+        }
+    
         Ok(())
     }
 
@@ -287,7 +318,7 @@ impl EmulatedTracker {
                         println!("Failed to send heartbeat packet: {e}");
                     }
 
-                    println!("Heartbeat packet sent: {:?}", packet);
+                    println!("Sending packet: {:?}", packet);
 
                     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                 }
@@ -442,7 +473,7 @@ mod tests {
             firmware_version,
             None,
             None,
-            None,
+            //None,
             None,
             None,
             None,
