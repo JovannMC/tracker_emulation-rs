@@ -350,7 +350,7 @@ impl EmulatedTracker {
      * Packet sending functions
      */
 
-    pub async fn start_heartbeat(&self) {
+    async fn start_heartbeat(&self) {
         let socket = match self.socket.as_ref() {
             Some(s) => s.clone(),
             None => {
