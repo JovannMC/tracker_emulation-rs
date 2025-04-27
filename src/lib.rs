@@ -225,12 +225,12 @@ impl EmulatedTracker {
             CbPacket::Heartbeat => {
                 println!("Received Heartbeat packet");
                 let packet_data: SbPacket = SbPacket::Heartbeat {};
-                self.send_packet(packet_data).await?;
+                self.send_packet(packet_data).await?
             }
             CbPacket::Ping { challenge } => {
                 println!("Received Ping packet with challenge: {:?}", challenge);
                 let packet_data: SbPacket = SbPacket::Ping { challenge };
-                self.send_packet(packet_data).await?;
+                self.send_packet(packet_data).await?
             }
             CbPacket::Discovery => {
                 // println!("Received Discovery packet");
