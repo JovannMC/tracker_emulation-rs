@@ -3,7 +3,7 @@ use firmware_protocol::{
     ActionType, BoardType, CbPacket, ImuType, McuType, Packet, SbPacket, SensorDataType,
     SensorStatus, SlimeQuaternion,
 };
-use tokio::time::sleep;
+use tokio::time::{interval, sleep};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 use tokio::net::UdpSocket;
@@ -123,7 +123,7 @@ impl EmulatedTracker {
         state.status = "idle".to_string();
         drop(state);
 
-        let mut discovery_interval = tokio::time::interval(std::time::Duration::from_secs(1));
+        let mut discovery_interval = interval(std::time::Duration::from_secs(1));
         let server_timeout = self.server_timeout;
 
         self.start_heartbeat().await;
@@ -244,6 +244,10 @@ impl EmulatedTracker {
         }
 
         Ok(())
+    }
+
+    pub fn subscribe_status(&self) -> Receiver<String> {
+        self.status_rx.clone()
     }
 
     /*
@@ -392,7 +396,7 @@ impl EmulatedTracker {
 
                     println!("Sending packet: {:?}", packet);
 
-                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    sleep(std::time::Duration::from_secs(1)).await;
                 }
                 Ok(())
             }
@@ -535,7 +539,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_all() {
-        use tokio::time::{sleep, Duration};
+        use {sleep, Duration};
 
         let mac_address = [0xDE, 0xAD, 0xBE, 0xEF, 0x01, 0x02];
         let firmware_version = "tracker_emulation-rs test".to_string();
