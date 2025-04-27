@@ -3,11 +3,13 @@ use firmware_protocol::{
     ActionType, BoardType, CbPacket, ImuType, McuType, Packet, SbPacket, SensorDataType,
     SensorStatus, SlimeQuaternion,
 };
+use tokio::time::sleep;
 use std::sync::{Arc, Mutex};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 use tokio::net::UdpSocket;
 use tokio::sync::watch::{self, Receiver, Sender};
 
+#[derive(Clone)]
 pub struct TrackerState {
     pub status: String,
     pub packet_number: u64,
@@ -67,7 +69,7 @@ impl EmulatedTracker {
         let server_port = server_discovery_port.unwrap_or(6969);
         let server_timeout = server_timeout_ms.unwrap_or(5000);
 
-        let (status_tx, status_rx) = watch::channel("initializing".to_string()); // Create a watch channel
+        let (status_tx, status_rx) = watch::channel("initializing".to_string());
 
         let state = Arc::new(Mutex::new(TrackerState {
             status: "initializing".to_string(),
@@ -90,6 +92,10 @@ impl EmulatedTracker {
             status_tx,
             status_rx,
         })
+    }
+
+    pub fn get_state(&self) -> TrackerState {
+        self.state.lock().unwrap().clone()
     }
 
     /*
@@ -118,8 +124,28 @@ impl EmulatedTracker {
         drop(state);
 
         let mut discovery_interval = tokio::time::interval(std::time::Duration::from_secs(1));
+        let server_timeout = self.server_timeout;
 
         self.start_heartbeat().await;
+
+        // Track last heartbeat time
+        let last_heartbeat = Arc::new(Mutex::new(SystemTime::now()));
+        let last_heartbeat_clone = last_heartbeat.clone();
+        let server_timeout_clone = server_timeout;
+        let state_clone = self.state.clone();
+        tokio::spawn(async move {
+            loop {
+                sleep(Duration::from_millis(server_timeout_clone)).await;
+                let last = last_heartbeat_clone.lock().unwrap();
+                let elapsed = last.elapsed().unwrap_or_default().as_millis() as u64;
+                if elapsed > server_timeout_clone {
+                    println!("Heartbeat timeout detected (no heartbeat within {server_timeout_clone} ms)");
+                    let mut state = state_clone.lock().unwrap();
+                    state.status = "initializing".to_string();
+                    drop(state);
+                }
+            }
+        });
 
         loop {
             tokio::select! {
@@ -138,7 +164,7 @@ impl EmulatedTracker {
                         let mut buf = [0u8; 1024];
                         match socket.recv_from(&mut buf).await {
                             Ok((size, addr)) => {
-                                println!("Received data from: {:?}, size: {}", addr, size);
+                                println!("Received data from: {addr:?}, size: {size}");
                                 println!("Data: {:?}", String::from_utf8_lossy(&buf[..size]));
                                 let mut state = self.state.lock().unwrap();
                                 if state.status != "connected-to-server" {
@@ -151,12 +177,21 @@ impl EmulatedTracker {
                                     .as_millis() as u16;
                                 drop(state);
 
+                                // Update last heartbeat time if a heartbeat is received
+                                if let Ok((_rest, packet)) = Packet::from_bytes((&buf[..size], 0)) {
+                                    let (_seq, packet_data) = packet.split();
+                                    if let CbPacket::Heartbeat = packet_data {
+                                        let mut last = last_heartbeat.lock().unwrap();
+                                        *last = SystemTime::now();
+                                    }
+                                }
+
                                 if let Err(e) = self.handle_packet(&buf[..size]).await {
-                                    println!("Error handling packet: {}", e);
+                                    println!("Error handling packet: {e}");
                                 }
                             }
                             Err(e) => {
-                                println!("Failed to receive data: {}", e);
+                                println!("Failed to receive data: {e}");
                             }
                         }
                     }
