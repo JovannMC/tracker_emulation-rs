@@ -3,7 +3,8 @@ use firmware_protocol::{
     ActionType, BoardType, CbPacket, ImuType, McuType, Packet, SbPacket, SensorDataType,
     SensorStatus, SlimeQuaternion,
 };
-use std::sync::{Arc, Mutex};
+use tokio::sync::Mutex;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use tokio::net::UdpSocket;
 use tokio::sync::watch::{self, Receiver, Sender};
@@ -94,8 +95,8 @@ impl EmulatedTracker {
         })
     }
 
-    pub fn get_state(&self) -> TrackerState {
-        self.state.lock().unwrap().clone()
+    pub async fn get_state(&self) -> TrackerState {
+        self.state.lock().await.clone()
     }
 
     /*
@@ -105,7 +106,7 @@ impl EmulatedTracker {
     pub async fn init(&mut self) -> Result<(), String> {
         // Only lock to check/update, then drop before await
         {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.lock().await;
             if state.status != "initializing" {
                 return Ok(());
             }
@@ -137,11 +138,11 @@ impl EmulatedTracker {
         tokio::spawn(async move {
             loop {
                 sleep(Duration::from_millis(server_timeout_clone)).await;
-                let last = last_heartbeat_clone.lock().unwrap();
+                let last = last_heartbeat_clone.lock().await;
                 let elapsed = last.elapsed().unwrap_or_default().as_millis() as u64;
                 if elapsed > server_timeout_clone {
                     println!("Heartbeat timeout detected (no heartbeat within {server_timeout_clone} ms)");
-                    let mut state = state_clone.lock().unwrap();
+                    let mut state = state_clone.lock().await; 
                     state.status = "initializing".to_string();
                     drop(state);
                 }
@@ -151,7 +152,7 @@ impl EmulatedTracker {
         loop {
             tokio::select! {
                 _ = discovery_interval.tick() => {
-                    let state = self.state.lock().unwrap();
+                    let state = self.state.lock().await;
                     if state.status != "connected-to-server" {
                         drop(state);
                         self.send_handshake().await?;
@@ -167,7 +168,7 @@ impl EmulatedTracker {
                             Ok((size, addr)) => {
                                 println!("Received data from: {addr:?}, size: {size}");
                                 println!("Data: {:?}", String::from_utf8_lossy(&buf[..size]));
-                                let mut state = self.state.lock().unwrap();
+                                let mut state = self.state.lock().await;
                                 if state.status != "connected-to-server" {
                                     state.status = "connected-to-server".to_string();
                                     self.status_tx.send("connected-to-server".to_string()).unwrap();
@@ -182,7 +183,7 @@ impl EmulatedTracker {
                                 if let Ok((_rest, packet)) = Packet::from_bytes((&buf[..size], 0)) {
                                     let (_seq, packet_data) = packet.split();
                                     if let CbPacket::Heartbeat = packet_data {
-                                        let mut last = last_heartbeat.lock().unwrap();
+                                        let mut last = last_heartbeat.lock().await;
                                         *last = SystemTime::now();
                                     }
                                 }
@@ -204,7 +205,7 @@ impl EmulatedTracker {
     }
 
     pub async fn deinit(&mut self) -> Result<(), String> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().await;
         if state.status == "initializing" {
             return Ok(());
         }
@@ -378,7 +379,7 @@ impl EmulatedTracker {
                     // gotta manually grab these info instead of using my methods cause self has a limited lifetime
                     // whatever that means man (i kinda get it but not really)
                     let packet_number = {
-                        let mut state_lock = state.lock().unwrap();
+                        let mut state_lock = state.lock().await;
                         state_lock.packet_number += 1;
                         state_lock.packet_number
                     };
@@ -450,7 +451,7 @@ impl EmulatedTracker {
     }
 
     async fn get_packet_number(&self) -> Result<u64, String> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().await;
         state.packet_number += 1;
         Ok(state.packet_number)
     }
