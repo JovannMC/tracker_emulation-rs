@@ -3,11 +3,11 @@ use firmware_protocol::{
     ActionType, BoardType, CbPacket, ImuType, McuType, Packet, SbPacket, SensorDataType,
     SensorStatus, SlimeQuaternion,
 };
-use tokio::sync::Mutex;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use tokio::net::UdpSocket;
 use tokio::sync::watch::{self, Receiver, Sender};
+use tokio::sync::Mutex;
 use tokio::time::{interval, sleep};
 
 #[derive(Clone)]
@@ -41,6 +41,7 @@ pub struct EmulatedTracker {
     server_timeout: u64,
     server_ip: String,
     server_port: u16,
+    debug: bool,
 
     sensors: Vec<Sensor>,
 
@@ -61,6 +62,7 @@ impl EmulatedTracker {
         server_ip: Option<String>,
         server_discovery_port: Option<u16>,
         server_timeout_ms: Option<u64>,
+        debug: Option<bool>,
     ) -> Result<Self, String> {
         // Set default values if the parameters are None
         //let feature_flags = feature_flags.unwrap_or(FirmwareFeatureFlags::None);
@@ -69,6 +71,7 @@ impl EmulatedTracker {
         let server_ip = server_ip.unwrap_or("255.255.255.255".to_string());
         let server_port = server_discovery_port.unwrap_or(6969);
         let server_timeout = server_timeout_ms.unwrap_or(5000);
+        let debug = debug.unwrap_or(false);
 
         let (status_tx, status_rx) = watch::channel("initializing".to_string());
 
@@ -88,6 +91,7 @@ impl EmulatedTracker {
             server_timeout,
             server_ip,
             server_port,
+            debug,
             socket: None,
             state,
             status_tx,
@@ -142,7 +146,7 @@ impl EmulatedTracker {
                 let elapsed = last.elapsed().unwrap_or_default().as_millis() as u64;
                 if elapsed > server_timeout_clone {
                     println!("Heartbeat timeout detected (no heartbeat within {server_timeout_clone} ms)");
-                    let mut state = state_clone.lock().await; 
+                    let mut state = state_clone.lock().await;
                     state.status = "initializing".to_string();
                     drop(state);
                 }
@@ -166,8 +170,10 @@ impl EmulatedTracker {
                         let mut buf = [0u8; 1024];
                         match socket.recv_from(&mut buf).await {
                             Ok((size, addr)) => {
-                                println!("Received data from: {addr:?}, size: {size}");
-                                println!("Data: {:?}", String::from_utf8_lossy(&buf[..size]));
+                                if self.debug {
+                                    println!("Received data from: {addr:?}, size: {size}");
+                                    println!("Data: {:?}", String::from_utf8_lossy(&buf[..size]));
+                                }
                                 let mut state = self.state.lock().await;
                                 if state.status != "connected-to-server" {
                                     state.status = "connected-to-server".to_string();
@@ -225,12 +231,16 @@ impl EmulatedTracker {
 
         match packet_data {
             CbPacket::Heartbeat => {
-                println!("Received Heartbeat packet");
+                if self.debug {
+                    println!("Received Heartbeat packet");
+                }
                 let packet_data: SbPacket = SbPacket::Heartbeat {};
                 self.send_packet(packet_data).await?
             }
             CbPacket::Ping { challenge } => {
-                println!("Received Ping packet with challenge: {:?}", challenge);
+                if self.debug {
+                    println!("Received Ping packet with challenge: {:?}", challenge);
+                }
                 let packet_data: SbPacket = SbPacket::Ping { challenge };
                 self.send_packet(packet_data).await?
             }
@@ -368,6 +378,7 @@ impl EmulatedTracker {
         let server_ip = self.server_ip.clone();
         let server_port = self.server_port;
         let state = self.state.clone();
+        let debug = self.debug;
 
         tokio::spawn(async move {
             let result: Result<(), String> = async {
@@ -396,7 +407,9 @@ impl EmulatedTracker {
                         println!("Failed to send heartbeat packet: {e}");
                     }
 
-                    println!("Sending packet: {:?}", packet);
+                    if debug {
+                        println!("Sending packet: {:?}", packet);
+                    }
 
                     sleep(std::time::Duration::from_secs(1)).await;
                 }
@@ -413,7 +426,9 @@ impl EmulatedTracker {
         let packet_number = self.get_packet_number().await?;
         let packet = Packet::new(packet_number, data);
 
-        println!("Sending packet: {:?}", packet);
+        if self.debug {
+            println!("Sending packet: {:?}", packet);
+        }
 
         let socket = self.socket.as_ref().expect("Socket not initialized");
         socket
