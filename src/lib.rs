@@ -3,11 +3,11 @@ use firmware_protocol::{
     ActionType, BoardType, CbPacket, ImuType, McuType, Packet, SbPacket, SensorDataType,
     SensorStatus, SlimeQuaternion,
 };
-use tokio::time::{interval, sleep};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 use tokio::net::UdpSocket;
 use tokio::sync::watch::{self, Receiver, Sender};
+use tokio::time::{interval, sleep};
 
 #[derive(Clone)]
 pub struct TrackerState {
@@ -103,9 +103,14 @@ impl EmulatedTracker {
      */
 
     pub async fn init(&mut self) -> Result<(), String> {
-        let mut state = self.state.lock().unwrap();
-        if state.status != "initializing" {
-            return Ok(());
+        // Only lock to check/update, then drop before await
+        {
+            let mut state = self.state.lock().unwrap();
+            if state.status != "initializing" {
+                return Ok(());
+            }
+            self.status_tx.send("idle".to_string()).unwrap();
+            state.status = "idle".to_string();
         }
 
         let bind_address = format!("{}:{}", "0.0.0.0", 0);
@@ -118,10 +123,6 @@ impl EmulatedTracker {
             .map_err(|e| format!("Failed to set broadcast option: {}", e))?;
 
         self.socket = Some(Arc::new(socket));
-
-        self.status_tx.send("idle".to_string()).unwrap();
-        state.status = "idle".to_string();
-        drop(state);
 
         let mut discovery_interval = interval(std::time::Duration::from_secs(1));
         let server_timeout = self.server_timeout;
