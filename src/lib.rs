@@ -3,6 +3,7 @@ use firmware_protocol::{
     ActionType, BoardType, CbPacket, ImuType, McuType, Packet, SbPacket, SensorDataType,
     SensorStatus, SlimeQuaternion,
 };
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use tokio::net::UdpSocket;
@@ -50,6 +51,7 @@ pub struct EmulatedTracker {
     socket: Option<Arc<UdpSocket>>,
     status_tx: Sender<String>,
     status_rx: Receiver<String>,
+    last_packet_time: Arc<AtomicU64>,
 }
 
 impl EmulatedTracker {
@@ -96,6 +98,7 @@ impl EmulatedTracker {
             state,
             status_tx,
             status_rx,
+            last_packet_time: Arc::new(AtomicU64::new(0)),
         })
     }
 
@@ -135,20 +138,18 @@ impl EmulatedTracker {
         self.start_heartbeat().await;
 
         // Track last heartbeat time
-        let last_heartbeat = Arc::new(Mutex::new(SystemTime::now()));
-        let last_heartbeat_clone = last_heartbeat.clone();
-        let server_timeout_clone = server_timeout;
+        let last_packet_time = self.last_packet_time.clone();
         let state_clone = self.state.clone();
+        let server_timeout_clone = server_timeout;
         tokio::spawn(async move {
             loop {
                 sleep(Duration::from_millis(server_timeout_clone)).await;
-                let last = last_heartbeat_clone.lock().await;
-                let elapsed = last.elapsed().unwrap_or_default().as_millis() as u64;
-                if elapsed > server_timeout_clone {
-                    println!("Heartbeat timeout detected (no heartbeat within {server_timeout_clone} ms)");
+                let last = last_packet_time.load(Ordering::Relaxed);
+                let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis() as u64;
+                if now - last > server_timeout_clone {
+                    println!("Heartbeat timeout detected (no data received within {server_timeout_clone} ms)");
                     let mut state = state_clone.lock().await;
                     state.status = "initializing".to_string();
-                    drop(state);
                 }
             }
         });
@@ -185,14 +186,10 @@ impl EmulatedTracker {
                                     .as_millis() as u16;
                                 drop(state);
 
-                                // Update last heartbeat time if a heartbeat is received
-                                if let Ok((_rest, packet)) = Packet::from_bytes((&buf[..size], 0)) {
-                                    let (_seq, packet_data) = packet.split();
-                                    if let CbPacket::Heartbeat = packet_data {
-                                        let mut last = last_heartbeat.lock().await;
-                                        *last = SystemTime::now();
-                                    }
-                                }
+                                self.last_packet_time.store(
+                                    SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis() as u64,
+                                    Ordering::Relaxed
+                                );                                
 
                                 if let Err(e) = self.handle_packet(&buf[..size]).await {
                                     println!("Error handling packet: {e}");
@@ -563,7 +560,7 @@ mod tests {
 
         // Create tracker instance
         let mut tracker =
-            EmulatedTracker::new(mac_address, firmware_version, None, None, None, None, None)
+            EmulatedTracker::new(mac_address, firmware_version, None, None, None, None, None, None)
                 .await
                 .expect("Failed to create EmulatedTracker");
 
