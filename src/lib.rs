@@ -9,7 +9,7 @@ use std::time::{Duration, SystemTime};
 use tokio::net::UdpSocket;
 use tokio::sync::watch::{self, Receiver, Sender};
 use tokio::sync::Mutex;
-use tokio::time::{interval, sleep};
+use tokio::time::{interval, sleep, timeout};
 
 #[derive(Clone)]
 pub struct TrackerState {
@@ -145,7 +145,10 @@ impl EmulatedTracker {
             loop {
                 sleep(Duration::from_millis(server_timeout_clone)).await;
                 let last = last_packet_time.load(Ordering::Relaxed);
-                let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis() as u64;
+                let now = SystemTime::now()
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis() as u64;
                 if now - last > server_timeout_clone {
                     println!("Heartbeat timeout detected (no data received within {server_timeout_clone} ms)");
                     let mut state = state_clone.lock().await;
@@ -154,57 +157,72 @@ impl EmulatedTracker {
             }
         });
 
-        loop {
-            tokio::select! {
-                _ = discovery_interval.tick() => {
-                    let state = self.state.lock().await;
-                    if state.status != "connected-to-server" {
-                        drop(state);
-                        self.send_handshake().await?;
-                    } else {
-                        break;
-                    }
-                }
-
-                _ = async {
-                    if let Some(socket) = self.socket.as_ref() {
-                        let mut buf = [0u8; 1024];
-                        match socket.recv_from(&mut buf).await {
-                            Ok((size, addr)) => {
-                                if self.debug {
-                                    println!("Received data from: {addr:?}, size: {size}");
-                                    println!("Data: {:?}", String::from_utf8_lossy(&buf[..size]));
-                                }
-                                let mut state = self.state.lock().await;
-                                if state.status != "connected-to-server" {
-                                    state.status = "connected-to-server".to_string();
-                                    self.status_tx.send("connected-to-server".to_string()).unwrap();
-                                }
-                                state.last_received_packet_time = SystemTime::now()
-                                    .duration_since(std::time::UNIX_EPOCH)
-                                    .unwrap()
-                                    .as_millis() as u16;
-                                drop(state);
-
-                                self.last_packet_time.store(
-                                    SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis() as u64,
-                                    Ordering::Relaxed
-                                );                                
-
-                                if let Err(e) = self.handle_packet(&buf[..size]).await {
-                                    println!("Error handling packet: {e}");
-                                }
+        let handshake_result = timeout(Duration::from_secs(2), async {
+            loop {
+                tokio::select! {
+                    _ = discovery_interval.tick() => {
+                        let state = self.state.lock().await;
+                        if state.status != "connected-to-server" {
+                            drop(state);
+                            if let Err(e) = self.send_handshake().await {
+                                println!("Failed to send handshake: {e}");
                             }
-                            Err(e) => {
-                                println!("Failed to receive data: {e}");
-                            }
+                        } else {
+                            break Ok(());
                         }
                     }
-                } => {}
+
+                    _ = async {
+                        if let Some(socket) = self.socket.as_ref() {
+                            let mut buf = [0u8; 1024];
+                            match socket.recv_from(&mut buf).await {
+                                Ok((size, addr)) => {
+                                    if self.debug {
+                                        println!("Received data from: {addr:?}, size: {size}");
+                                        println!("Data: {:?}", String::from_utf8_lossy(&buf[..size]));
+                                    }
+                                    let mut state = self.state.lock().await;
+                                    if state.status != "connected-to-server" {
+                                        state.status = "connected-to-server".to_string();
+                                        self.status_tx.send("connected-to-server".to_string()).unwrap();
+                                    }
+                                    state.last_received_packet_time = SystemTime::now()
+                                        .duration_since(SystemTime::UNIX_EPOCH)
+                                        .unwrap()
+                                        .as_millis() as u16;
+                                    drop(state);
+
+                                    self.last_packet_time.store(
+                                        SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis() as u64,
+                                        Ordering::Relaxed
+                                    );
+
+                                    if let Err(e) = self.handle_packet(&buf[..size]).await {
+                                        println!("Error handling packet: {e}");
+                                    }
+                                }
+                                Err(e) => {
+                                    println!("Failed to receive data: {e}");
+                                }
+                            }
+                        }
+                    } => {}
+                }
+            }
+        }).await;
+
+        match handshake_result {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(e)) => Err(e),
+            Err(_) => {
+                println!("Timed out waiting for handshake response - SlimeVR Server is probably not running");
+                let mut state = self.state.lock().await;
+                state.status = "initializing".to_string();
+                self.status_tx.send("initializing".to_string()).unwrap();
+                drop(state);
+                Ok(())
             }
         }
-
-        Ok(())
     }
 
     pub async fn deinit(&mut self) -> Result<(), String> {
@@ -228,18 +246,30 @@ impl EmulatedTracker {
 
         match packet_data {
             CbPacket::Heartbeat => {
-                if self.debug {
-                    println!("Received Heartbeat packet");
-                }
+                println!("Received Heartbeat packet");
                 let packet_data: SbPacket = SbPacket::Heartbeat {};
-                self.send_packet(packet_data).await?
+                let socket = self.socket.as_ref().ok_or("Socket not initialized")?;
+                socket
+                    .send_to(
+                        &Packet::new(0, packet_data).to_bytes().unwrap(),
+                        (self.server_ip.as_str(), self.server_port),
+                    )
+                    .await
+                    .map_err(|e| e.to_string())?;
+                println!("Sent Heartbeat packet");
             }
             CbPacket::Ping { challenge } => {
-                if self.debug {
-                    println!("Received Ping packet with challenge: {:?}", challenge);
-                }
+                println!("Received Ping packet with challenge: {:?}", challenge);
                 let packet_data: SbPacket = SbPacket::Ping { challenge };
-                self.send_packet(packet_data).await?
+                let socket = self.socket.as_ref().ok_or("Socket not initialized")?;
+                socket
+                    .send_to(
+                        &Packet::new(0, packet_data).to_bytes().unwrap(),
+                        (self.server_ip.as_str(), self.server_port),
+                    )
+                    .await
+                    .map_err(|e| e.to_string())?;
+                println!("Sent Pong packet with challenge: {:?}", challenge);
             }
             CbPacket::Discovery => {
                 // println!("Received Discovery packet");
@@ -404,9 +434,9 @@ impl EmulatedTracker {
                         println!("Failed to send heartbeat packet: {e}");
                     }
 
-                    if debug {
-                        println!("Sending packet: {:?}", packet);
-                    }
+                    // if debug {
+                    //     println!("Sending packet: {:?}", packet);
+                    // }
 
                     sleep(std::time::Duration::from_secs(1)).await;
                 }
@@ -421,11 +451,20 @@ impl EmulatedTracker {
 
     async fn send_packet(&self, data: SbPacket) -> Result<(), String> {
         let packet_number = self.get_packet_number().await?;
+
+        match &data {
+            SbPacket::Acceleration { .. } => {}
+            SbPacket::RotationData { .. } => {}
+            _ => {
+                println!("Sending packet: {:?}", data);
+            }
+        }
+
         let packet = Packet::new(packet_number, data);
 
-        if self.debug {
-            println!("Sending packet: {:?}", packet);
-        }
+        // if self.debug {
+        //     println!("Sending packet: {:?}", packet);
+        // }
 
         let socket = self.socket.as_ref().expect("Socket not initialized");
         socket
@@ -559,10 +598,18 @@ mod tests {
         let firmware_version = "tracker_emulation-rs test".to_string();
 
         // Create tracker instance
-        let mut tracker =
-            EmulatedTracker::new(mac_address, firmware_version, None, None, None, None, None, None)
-                .await
-                .expect("Failed to create EmulatedTracker");
+        let mut tracker = EmulatedTracker::new(
+            mac_address,
+            firmware_version,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("Failed to create EmulatedTracker");
 
         tracker.init().await.expect("Failed to initialize tracker");
         sleep(Duration::from_secs(1)).await;
