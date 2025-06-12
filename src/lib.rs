@@ -72,7 +72,11 @@ impl EmulatedTracker {
         let mcu_type = mcu_type.unwrap_or(McuType::Unknown(0));
         let server_ip = server_ip.unwrap_or("255.255.255.255".to_string());
         let server_port = server_discovery_port.unwrap_or(6969);
-        let server_timeout = server_timeout_ms.unwrap_or(5000);
+        let server_timeout = match server_timeout_ms {
+            Some(timeout) if timeout <= 0 => u64::MAX,
+            Some(timeout) => timeout,
+            None => 5000,
+        };
         let debug = debug.unwrap_or(false);
 
         let (status_tx, status_rx) = watch::channel("initializing".to_string());
