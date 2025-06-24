@@ -11,7 +11,7 @@ use tokio::sync::watch::{self, Receiver, Sender};
 use tokio::sync::Mutex;
 use tokio::time::{interval, sleep, timeout};
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct TrackerState {
     pub status: String,
     pub packet_number: u64,
@@ -32,6 +32,7 @@ pub struct Sensor {
     pub sensor_status: SensorStatus,
 }
 
+#[derive(Debug)]
 pub struct EmulatedTracker {
     // Configuration
     mac_address: [u8; 6],
